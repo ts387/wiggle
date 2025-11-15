@@ -239,7 +239,8 @@ class Lattice:
         x0, x1 = np.meshgrid(np.linspace(-extent, extent, d, endpoint=True),
                              np.linspace(-extent, extent, d, endpoint=True))
         coords = np.stack([x0.ravel(), x1.ravel(), np.zeros(d ** 2)], 1).astype(np.float32)
-        return torch.tensor(coords)
+        # Ensure downsampled coordinates are on the same device as the lattice
+        return torch.tensor(coords, device=self.coords.device)
 
     def get_square_lattice(self, L):
         b, e = self.D2 - L, self.D2 + L + 1

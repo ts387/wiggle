@@ -6,7 +6,8 @@ from Qt import QtCore
 from scipy.ndimage import zoom
 from skimage.transform import pyramid_gaussian, pyramid_reduce
 import itertools
-from .device_utils import get_available_device
+import warnings
+from .device_utils import get_available_device, safe_to_device
 
 # self.thread5 = QtCore.QThread()
 # self.miniSPARC.moveToThread(self.thread5)
@@ -171,26 +172,52 @@ class FFT(QtCore.QObject):
     def fourier_filter_gpu(self, map, mask):
         """GPU-accelerated Fourier filtering using PyTorch.
 
-        Supports both CUDA and Metal (MPS) backends.
+        Supports both CUDA and Metal (MPS) backends with automatic CPU fallback
+        if MPS operations are not supported.
         """
-        # Convert NumPy array to PyTorch tensor and move to device
-        map_tensor = torch.from_numpy(map).to(self.device)
+        try:
+            # Convert NumPy array to PyTorch tensor and move to device
+            map_tensor = safe_to_device(torch.from_numpy(map), self.device, "3D FFT input")
 
-        # Perform 3D FFT
-        fft_3d = torch.fft.fftn(map_tensor)
+            # Perform 3D FFT
+            fft_3d = torch.fft.fftn(map_tensor)
 
-        # Shift zero frequency to center
-        shift = torch.fft.fftshift(fft_3d)
+            # Shift zero frequency to center
+            shift = torch.fft.fftshift(fft_3d)
 
-        # Apply mask
-        filtered = torch.multiply(shift, mask)
+            # Apply mask
+            filtered = torch.multiply(shift, mask)
 
-        # Inverse shift and inverse FFT
-        filtered = torch.fft.ifftshift(filtered)
-        result = torch.fft.ifftn(filtered)
+            # Inverse shift and inverse FFT
+            filtered = torch.fft.ifftshift(filtered)
+            result = torch.fft.ifftn(filtered)
 
-        # Take real part and convert back to NumPy
-        return result.real.cpu().numpy()
+            # Take real part and convert back to NumPy
+            return result.real.cpu().numpy()
+
+        except (RuntimeError, NotImplementedError) as e:
+            # MPS FFT operations may not be fully supported in all PyTorch versions
+            if self.device.type == 'mps':
+                warnings.warn(
+                    f"MPS FFT operation failed: {e}\n"
+                    f"Falling back to CPU-based Fourier filtering. "
+                    f"For better performance, upgrade to PyTorch 2.0+",
+                    RuntimeWarning
+                )
+                # Fall back to CPU-based NumPy implementation
+                return self.fourier_filter(map, mask.cpu().numpy())
+            else:
+                # For other devices, re-raise the exception
+                raise
+
+        except Exception as e:
+            # Unexpected error - fall back to CPU implementation
+            warnings.warn(
+                f"GPU Fourier filtering failed unexpectedly: {e}\n"
+                f"Falling back to CPU implementation.",
+                RuntimeWarning
+            )
+            return self.fourier_filter(map, mask.cpu().numpy() if torch.is_tensor(mask) else mask)
 
     # def generate_sphere(self, volumeSize, radius):
     #     x_ = np.linspace(0, volumeSize, volumeSize)

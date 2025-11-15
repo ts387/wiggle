@@ -10,6 +10,7 @@ Supports NVIDIA CUDA, Apple Metal (MPS), and CPU fallback.
 
 import torch
 import sys
+import warnings
 
 
 def get_available_device(verbose=True):
@@ -47,6 +48,13 @@ def get_available_device(verbose=True):
         device = torch.device('mps')
         device_type = 'mps'
 
+        # Check PyTorch version for MPS compatibility
+        torch_version = torch.__version__.split('+')[0]
+        try:
+            major, minor = map(int, torch_version.split('.')[:2])
+        except:
+            major, minor = 1, 0
+
         # Try to detect M-series chip
         try:
             import platform
@@ -66,6 +74,17 @@ def get_available_device(verbose=True):
 
         if verbose:
             print(f"GPU acceleration: Metal (MPS) detected ({device_name})")
+
+            # Warn about PyTorch version compatibility
+            if major < 2:
+                print(f"WARNING: PyTorch {torch_version} detected. For best MPS compatibility, upgrade to PyTorch 2.0+")
+                print("         Some operations may fall back to CPU")
+            elif major == 1 and minor < 12:
+                print(f"WARNING: PyTorch {torch_version} too old for MPS support (requires 1.12+)")
+                print("         Falling back to CPU")
+                device = torch.device('cpu')
+                device_type = 'cpu'
+                device_name = "CPU"
 
         return device, device_type, device_name
 
@@ -122,6 +141,48 @@ def move_to_device(tensor, device):
     except Exception as e:
         print(f"WARNING: Failed to move tensor to {device}: {e}")
         print("         Falling back to CPU")
+        return tensor.to('cpu')
+
+
+def safe_to_device(tensor, device, operation_name="operation"):
+    """
+    Safely move tensor to device with MPS compatibility fallback.
+
+    This function provides robust error handling for MPS operations that may
+    not be fully supported in all PyTorch versions.
+
+    Args:
+        tensor (torch.Tensor): Input tensor
+        device (torch.device or str): Target device
+        operation_name (str): Name of the operation for error reporting
+
+    Returns:
+        torch.Tensor: Tensor on the target device (or CPU if MPS fails)
+    """
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    try:
+        return tensor.to(device)
+    except (RuntimeError, NotImplementedError) as e:
+        if device.type == 'mps':
+            warnings.warn(
+                f"MPS operation '{operation_name}' not supported: {e}\n"
+                f"Falling back to CPU for this operation. "
+                f"Consider upgrading PyTorch to version 2.0+ for better MPS support.",
+                RuntimeWarning
+            )
+            return tensor.to('cpu')
+        else:
+            # For non-MPS devices, re-raise the exception
+            raise
+    except Exception as e:
+        # Catch-all for unexpected errors
+        warnings.warn(
+            f"Unexpected error in '{operation_name}' on {device.type}: {e}\n"
+            f"Falling back to CPU.",
+            RuntimeWarning
+        )
         return tensor.to('cpu')
 
 
