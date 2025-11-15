@@ -1,7 +1,7 @@
 # @Original author: Ellen Zhong, MIT and Princeton University
 
 # @Modified by:   Charles Bayly-Jones, Monash University
-# @Last modified time: 07-Sep-2022
+# @Last modified time: 2025-11-15 (Metal GPU support added)
 
 # @License: GNU General Public License v3.0
 
@@ -12,6 +12,7 @@ import numpy as np
 from Qt import QtCore
 import mrcfile
 import math
+from .device_utils import get_available_device, set_default_device
 
 class params:
     def __init__(self, config, weights):
@@ -121,7 +122,7 @@ class HetOnlyVAE(nn.Module):
         '''
         cfg = miniDRGN.load_pkl(config) if type(config) is str else config
         c = cfg['lattice_args']
-        lat = Lattice(c['D'], extent=c['extent'])
+        lat = Lattice(c['D'], extent=c['extent'], device=device)
         c = cfg['model_args']
         if c['enc_mask'] > 0:
             enc_mask = lat.get_circular_mask(c['enc_mask'])
@@ -142,12 +143,13 @@ class HetOnlyVAE(nn.Module):
                            domain=c['domain'],
                            activation=activation)
         if weights is not None:
-            ckpt = torch.load(weights) if type(weights) is str else weights.flatten()[0]
+            ckpt = torch.load(weights, map_location=device) if type(weights) is str else weights.flatten()[0]
             #ckpt = torch.load(weights)
             #ckpt = weights.flatten()[0]
             model.load_state_dict(ckpt['model_state_dict'], strict=False)
         if device is not None:
             model.to(device)
+            lat.to(device)
         return model, lat
 
     def reparameterize(self, mu, logvar):
@@ -198,7 +200,7 @@ class HetOnlyVAE(nn.Module):
             return model(in_dim, D, layers, dim, activation, enc_type=enc_type, enc_dim=enc_dim)
 
 class Lattice:
-    def __init__(self, D, extent=0.5, ignore_DC=True):
+    def __init__(self, D, extent=0.5, ignore_DC=True, device=None):
         assert D % 2 == 1, "Lattice size must be odd"
         x0, x1 = np.meshgrid(np.linspace(-extent, extent, D, endpoint=True),
                              np.linspace(-extent, extent, D, endpoint=True))
@@ -219,6 +221,17 @@ class Lattice:
         self.freqs2d = self.coords[:, 0:2] / extent / 2
 
         self.ignore_DC = ignore_DC
+
+        # Move to device if specified
+        if device is not None:
+            self.to(device)
+
+    def to(self, device):
+        """Move lattice tensors to the specified device."""
+        self.coords = self.coords.to(device)
+        self.center = self.center.to(device)
+        self.freqs2d = self.freqs2d.to(device)
+        return self
 
     def get_downsample_coords(self, d):
         assert d % 2 == 1
@@ -415,7 +428,7 @@ class FTPositionalDecoder(nn.Module):
         result[..., 1][w] *= -1  # replace with complex conjugate to get correct values for original lattice positions
         return result
 
-    def eval_volume(self, coords, D, extent, norm, mask=None, zval=None):
+    def eval_volume(self, coords, D, extent, norm, mask=None, zval=None, device=None):
         '''
         Evaluate the model on a DxDxD volume
 
@@ -425,17 +438,23 @@ class FTPositionalDecoder(nn.Module):
             extent: extent of lattice [-extent, extent]
             norm: data normalization
             zval: value of latent (zdim x 1)
+            device: torch.device (optional, uses model's device if not specified)
         '''
         assert extent <= 0.5
+
+        # Use model's device if not specified
+        if device is None:
+            device = next(self.parameters()).device
+
         if zval is not None:
             zdim = len(zval)
-            z = torch.tensor(zval, dtype=torch.float32)
+            z = torch.tensor(zval, dtype=torch.float32, device=device)
 
         vol_f = np.zeros((D, D, D), dtype=np.float32)
         assert not self.training
         # evaluate the volume by zslice to avoid memory overflows
         for i, dz in enumerate(np.linspace(-extent, extent, D, endpoint=True, dtype=np.float32)):
-            x = coords + torch.tensor([0, 0, dz])
+            x = coords + torch.tensor([0, 0, dz], device=device)
             keep = x.pow(2).sum(dim=1) <= extent ** 2
             x = x[keep]
             if zval is not None:
@@ -446,9 +465,9 @@ class FTPositionalDecoder(nn.Module):
                 else:
                     y = self.decode(x)
                     y = y[..., 0] - y[..., 1]
-                slice_ = torch.zeros(D ** 2, device='cpu')
-                slice_[keep] = y.cpu()
-                slice_ = slice_.view(D, D).numpy()
+                slice_ = torch.zeros(D ** 2, device=device)
+                slice_[keep] = y
+                slice_ = slice_.cpu().view(D, D).numpy()
             vol_f[i] = slice_
         vol_f = vol_f * norm[1] + norm[0]
 
@@ -518,14 +537,9 @@ class miniDRGN(QtCore.QObject):
         super().__init__()
 
     def load_into_gpu(self, args):
-        ## set the device
-        use_cuda = torch.cuda.is_available()
-
-        if use_cuda:
-            torch.set_default_tensor_type(torch.cuda.FloatTensor)
-            print("GPU is detected")
-        else:
-            print('WARNING: No GPUs detected')
+        ## Detect and set the best available device (CUDA > MPS > CPU)
+        self.device, self.device_type, self.device_name = get_available_device(verbose=True)
+        set_default_device(self.device)
 
         cfg = self.overwrite_config(args.config, args)
 
@@ -536,7 +550,7 @@ class miniDRGN(QtCore.QObject):
             assert args.downsample % 2 == 0, "Boxsize must be even"
             assert args.downsample <= self.D - 1, "Must be smaller than original box size"
 
-        self.model, self.lattice = HetOnlyVAE.load(cfg, args.weights)
+        self.model, self.lattice = HetOnlyVAE.load(cfg, args.weights, device=self.device)
         self.model.eval()
 
     def overwrite_config(self, config_pkl, args):

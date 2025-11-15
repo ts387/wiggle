@@ -1,11 +1,12 @@
 import mrcfile
 import numpy as np
 import time
-import cupy as cp
+import torch
 from Qt import QtCore
 from scipy.ndimage import zoom
 from skimage.transform import pyramid_gaussian, pyramid_reduce
 import itertools
+from .device_utils import get_available_device
 
 # self.thread5 = QtCore.QThread()
 # self.miniSPARC.moveToThread(self.thread5)
@@ -27,6 +28,9 @@ class miniSPARC(QtCore.QObject):
         self.consensus = consensus
         self.components = components
         self.component_vector = components.reshape(self._c, consensus.shape[0] ** 3)
+
+        # Detect best available device (CUDA > MPS > CPU)
+        self.device, self.device_type, self.device_name = get_available_device(verbose=True)
 
     def crop_to_box(self):
         crop = self.ui.spinBox_2B.value()
@@ -52,7 +56,7 @@ class miniSPARC(QtCore.QObject):
 
         low_pass = self.ui.doubleSpinBox_9.value()
         self.thread_FFT = QtCore.QThread()
-        F = FFT(C.consensus, C.components, self.apix_curr, low_pass)
+        F = FFT(C.consensus, C.components, self.apix_curr, low_pass, self.device)
         F.moveToThread(self.thread_FFT)
         self.thread_FFT.started.connect(F.filter)
         F.finished.connect(self.thread_FFT.quit)
@@ -133,19 +137,21 @@ class Crop:
 
 class FFT(QtCore.QObject):
     finished = QtCore.Signal()
-    def __init__(self, consensus, components, apix, filter_resolution):
+    def __init__(self, consensus, components, apix, filter_resolution, device=None):
         super().__init__()
         self.consensus_unfil = consensus
         self.components_unfil = components
         self.apix = apix
         self._c = len(components)
         self.filter_resolution = filter_resolution
+        # Use provided device or default to CPU
+        self.device = device if device is not None else torch.device('cpu')
 
     def filter(self):
         if self.filter_resolution > 1:
             self.box = self.consensus_unfil.shape[0]
             nyquist_fraction = 2 * self.resolution_to_radius(self.apix, self.filter_resolution, self.box)
-            mask = cp.array(self.generate_sphere2((self.box,self.box,self.box), (nyquist_fraction)))
+            mask = torch.from_numpy(self.generate_sphere2((self.box, self.box, self.box), nyquist_fraction)).to(self.device)
             self.consensus = self.fourier_filter_gpu(self.consensus_unfil, mask)
             self.components = np.array([self.fourier_filter_gpu(self.components_unfil[i], mask) for i in range(0, self._c)])
             self.component_vector = self.components.reshape(self._c, self.box ** 3)
@@ -157,14 +163,34 @@ class FFT(QtCore.QObject):
         self.finished.emit()
 
     def fourier_filter(self, map, mask):
+        """CPU-based Fourier filtering using NumPy."""
         fft_3d = np.fft.fftn(map)
         shift = np.fft.fftshift(fft_3d)
         return np.real(np.fft.ifftn(np.fft.ifftshift(np.multiply(shift, mask))))
 
     def fourier_filter_gpu(self, map, mask):
-        fft_3d = cp.fft.fftn(cp.array(map))
-        shift = cp.fft.fftshift(fft_3d)
-        return np.real(cp.asnumpy(cp.fft.ifftn(cp.fft.ifftshift(cp.multiply(shift, mask)))))
+        """GPU-accelerated Fourier filtering using PyTorch.
+
+        Supports both CUDA and Metal (MPS) backends.
+        """
+        # Convert NumPy array to PyTorch tensor and move to device
+        map_tensor = torch.from_numpy(map).to(self.device)
+
+        # Perform 3D FFT
+        fft_3d = torch.fft.fftn(map_tensor)
+
+        # Shift zero frequency to center
+        shift = torch.fft.fftshift(fft_3d)
+
+        # Apply mask
+        filtered = torch.multiply(shift, mask)
+
+        # Inverse shift and inverse FFT
+        filtered = torch.fft.ifftshift(filtered)
+        result = torch.fft.ifftn(filtered)
+
+        # Take real part and convert back to NumPy
+        return result.real.cpu().numpy()
 
     # def generate_sphere(self, volumeSize, radius):
     #     x_ = np.linspace(0, volumeSize, volumeSize)

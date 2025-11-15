@@ -1,7 +1,10 @@
 ![WIGGLE logo](https://github.com/charbj/wiggle/blob/main/src/resources/Wiggle.PNG)
 
-# WIGGLE 0.2.1 (alpha)
+# WIGGLE 0.2.2+ (alpha)
 Graphical user interface to integrate cryo-EM flexibility analyses with ChimeraX.
+
+## What's New in 0.2.2+
+🎉 **Metal GPU Support for Apple Silicon!** Wiggle now supports GPU acceleration on M-series Macs (M1, M2, M3) via PyTorch's Metal Performance Shaders (MPS) backend. The refactored codebase automatically detects and uses the best available GPU backend (CUDA or Metal), eliminating the need for CuPy and enabling true cross-platform GPU acceleration.
 
 ## What is WIGGLE?
 Wiggle is a software package that integrates within [UCSF ChimeraX](https://www.cgl.ucsf.edu/chimerax/) to perform conformational flexibility analysis. Wiggle facilitates more interactive, intuitive, and rapid analysis of cryo-EM flexibility data types. Wiggle provides a tool to structural biologists to seemlessly visualise [cryoDRGN](http://cb.csail.mit.edu/cb/cryodrgn/) or [cryoSPARC](https://cryosparc.com/) [3D variability](https://guide.cryosparc.com/processing-data/tutorials-and-case-studies/tutorial-3d-variability-analysis-part-one) results while simultaneously visualising 3D volumetric data. The goal is to facilitate the sharing, deposition, analysis, and interpretation of next generation cryo-EM data types. Wiggle provides several key tools to achieve these goals:
@@ -20,43 +23,46 @@ Wiggle is a software package that integrates within [UCSF ChimeraX](https://www.
 
 ## Dependencies
 * UCSF ChimeraX >=1.3 (Should work on versions below 1.3 but not tested).
-* CryoSPARC and cryoDRGN functionality depends on a CUDA accelerated GPU. CPU can work in principal, although it's quite slow and not currently implemented.
-* The following pip-installable packaged:
-  * cupy_cuda100 - !! Important that this matches your CUDA version. Here CUDA 10.0
+* **GPU Acceleration** (highly recommended):
+  * **NVIDIA GPUs**: CUDA support via PyTorch
+  * **Apple M-series Macs**: Metal Performance Shaders (MPS) support via PyTorch
+  * **CPU fallback**: Works but significantly slower
+* The following pip-installable packages:
+  * **torch** (PyTorch with GPU support) - [installation guide](https://pytorch.org/get-started/locally/)
+    * For NVIDIA GPUs: Install with CUDA support
+    * For M-series Macs: PyTorch v1.12+ includes MPS backend
+    * For CPU-only: Standard PyTorch installation
   * mrcfile
   * phate
   * umap-learn
   * pyqtgraph
   * scikit-image
-  * torch [useful installation guide](https://pytorch.org/get-started/previous-versions/)
   * sklearn
   * pyyaml
+
+**Note**: Previous versions required CuPy for GPU acceleration. As of version 0.2.2+, wiggle uses PyTorch for all GPU operations, enabling cross-platform GPU support including Apple Silicon Macs.
 
 ## Installation - developmental version
 This is an experimental and developmental version, currently in testing. In the future, Wiggle will be available via the UCSF ChimeraX toolshed. For now, to use Wiggle you must install it manually (see below).
 
-  ### Verify your CUDA version. 
-Cupy must match your CUDA library versions, otherwise it will complain. Check the suffix on the end of your CUDA libXXX.so files. My version is CUDA 10, so the libraries end with libXXX.so.10.0 - use this for your cupy installation (even if nvidia-smi reports something else e.g. cuda 10.1 or 10.2, etc).
+  ### Install ChimeraX
 
-      $ ls /usr/local/cuda/lib64/*
-      
-      libcudart.so.10.0   libcusolver.so.10.0  libcufftw.so.10.0  etc ...
+First install [UCSF ChimeraX 1.3](https://www.cgl.ucsf.edu/chimerax/older_releases.html) or newer.
 
-The CUDA libraries must be on the terminal path for cupy to work. Either 1) set the following path before launching ChimeraX via the command line, 2) set the CUDA lib path on your system in your `~/.bashrc` file
-      
-      export LD_LIBRARY_PATH=/usr/local/cuda/lib64/:$LD_LIBRARY_PATH
-      
-  ### Get dependencies
-  
-First install [UCSF ChimeraX 1.3](https://www.cgl.ucsf.edu/chimerax/older_releases.html).
+  ### Install Dependencies
 
-Install the above pip packages using the UCSF ChimeraX python
+Install the required pip packages using the UCSF ChimeraX python:
 
-      /path/to/ChimeraX/bin/python3.9 -m pip install cupy-cuda100 mrcfile phate umap-learn pyqtgraph scikit-image sklearn torch pyyaml
+      /path/to/ChimeraX/bin/python3.9 -m pip install torch mrcfile phate umap-learn pyqtgraph scikit-image sklearn pyyaml
 
-Some users have reported that the above method fails (maybe if ChimeraX was installed via `apt install .deb` - see https://github.com/charbj/wiggle/issues/2). If this is the case, try the following:
+**For GPU acceleration:**
+- **NVIDIA GPUs**: Install PyTorch with CUDA support following the [PyTorch installation guide](https://pytorch.org/get-started/locally/)
+- **M-series Macs**: The standard PyTorch installation includes Metal (MPS) backend support
+- The appropriate GPU backend will be automatically detected at runtime
 
-      /path/to/ChimeraX/bin/ChimeraX -m pip install cupy-cuda100 mrcfile phate umap-learn pyqtgraph scikit-image sklearn torch pyyaml
+Some users have reported that the above method fails (if ChimeraX was installed via `apt install .deb` - see https://github.com/charbj/wiggle/issues/2). If this is the case, try the following:
+
+      /path/to/ChimeraX/bin/ChimeraX -m pip install torch mrcfile phate umap-learn pyqtgraph scikit-image sklearn pyyaml
 
 ### Clone WIGGLE and install into ChimeraX.
 
@@ -96,8 +102,14 @@ e.g. 2 - Compile cryoSPARC outputs into single-file format
 ### How do I use the cryoSPARC 3D Flex mode?
 This is not currently available, pending further details from the cryoSPARC team. This will be implemented in a future release. It is currently a place holder... sorry!
 
-### I get an error that cupy can't find a specific libXXX.so.X.Y.Z file?
-Make sure your cupy installation exactly matches your cuda version. See installation instructions above.
+### Does Wiggle work on M-series Macs (Apple Silicon)?
+Yes! As of version 0.2.2+, Wiggle supports GPU acceleration on M-series Macs (M1, M2, M3, etc.) via Apple's Metal Performance Shaders (MPS) backend in PyTorch. The appropriate GPU backend (CUDA or Metal) is automatically detected at runtime.
+
+### Which GPU backend is being used?
+When you launch Wiggle, it will automatically detect and report the available GPU backend:
+- `GPU acceleration: CUDA detected` - NVIDIA GPU
+- `GPU acceleration: Metal (MPS) detected` - Apple M-series GPU
+- `WARNING: No GPU detected. Using CPU` - CPU fallback mode
 
 ### How can I explore WIGGLE if I don't have any cryoSPARC or cryoDRGN results?
 [Ellen Zhong](https://github.com/zhonge), the main author behind cryoDRGN, has made some pre-computed results available via [Zenodo](https://zenodo.org/record/4355284#.YxiKXNJBy4o). Check out her [paper](https://www.nature.com/articles/s41592-020-01049-4) for details.
