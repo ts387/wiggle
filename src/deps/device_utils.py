@@ -13,7 +13,11 @@ import sys
 import warnings
 
 
-def get_available_device(verbose=True):
+# Global cache for device detection to avoid redundant checks
+_CACHED_DEVICE = None
+
+
+def get_available_device(verbose=True, force_redetect=False):
     """
     Detect and return the best available compute device.
 
@@ -21,6 +25,7 @@ def get_available_device(verbose=True):
 
     Args:
         verbose (bool): Print device information
+        force_redetect (bool): Force re-detection even if cached result exists
 
     Returns:
         tuple: (device, device_type, device_name)
@@ -28,6 +33,14 @@ def get_available_device(verbose=True):
             - device_type: str ('cuda', 'mps', or 'cpu')
             - device_name: str (human-readable device name)
     """
+    global _CACHED_DEVICE
+
+    # Return cached result if available (unless force_redetect is True)
+    if _CACHED_DEVICE is not None and not force_redetect:
+        if verbose:
+            device, device_type, device_name = _CACHED_DEVICE
+            print(f"Using cached device: {device_type.upper()} ({device_name})")
+        return _CACHED_DEVICE
 
     # Check for NVIDIA CUDA
     if torch.cuda.is_available():
@@ -41,7 +54,8 @@ def get_available_device(verbose=True):
         if verbose:
             print(f"GPU acceleration: CUDA detected ({device_name})")
 
-        return device, device_type, device_name
+        _CACHED_DEVICE = (device, device_type, device_name)
+        return _CACHED_DEVICE
 
     # Check for Apple Metal (MPS)
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -86,7 +100,8 @@ def get_available_device(verbose=True):
                 device_type = 'cpu'
                 device_name = "CPU"
 
-        return device, device_type, device_name
+        _CACHED_DEVICE = (device, device_type, device_name)
+        return _CACHED_DEVICE
 
     # CPU fallback
     else:
@@ -100,29 +115,55 @@ def get_available_device(verbose=True):
             print("  - On NVIDIA systems: Install CUDA toolkit and PyTorch with CUDA support")
             print("  - On M-series Macs: Install PyTorch with MPS support (v1.12+)")
 
-        return device, device_type, device_name
+        _CACHED_DEVICE = (device, device_type, device_name)
+        return _CACHED_DEVICE
 
 
 def set_default_device(device):
     """
-    Set the default tensor type for the given device.
+    Set the default tensor type for the given device with robust error handling.
 
     Args:
         device (torch.device): The device to set as default
     """
-    if device.type == 'cuda':
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
-    elif device.type == 'mps':
-        # MPS doesn't support set_default_tensor_type, so we use set_default_device instead
-        # This requires PyTorch 2.0+
-        try:
-            torch.set_default_device(device)
-        except AttributeError:
-            # Fallback for older PyTorch versions
-            print("WARNING: PyTorch version doesn't support set_default_device for MPS")
-            print("         Tensors will need to be manually moved to MPS device")
-    else:
-        torch.set_default_tensor_type(torch.FloatTensor)
+    try:
+        if device.type == 'cuda':
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
+        elif device.type == 'mps':
+            # MPS doesn't support set_default_tensor_type, so we use set_default_device instead
+            # This requires PyTorch 2.0+
+            try:
+                torch.set_default_device(device)
+            except AttributeError:
+                # Fallback for older PyTorch versions
+                warnings.warn(
+                    "PyTorch version doesn't support set_default_device for MPS. "
+                    "Tensors will need to be manually moved to MPS device. "
+                    "Consider upgrading to PyTorch 2.0+",
+                    RuntimeWarning
+                )
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to set MPS as default device: {e}. "
+                    "Tensors will be created on CPU and moved to MPS as needed.",
+                    RuntimeWarning
+                )
+        else:
+            torch.set_default_tensor_type(torch.FloatTensor)
+
+    except RuntimeError as e:
+        # CUDA initialization can fail for various reasons
+        warnings.warn(
+            f"Failed to set default device to {device.type}: {e}\n"
+            f"Continuing with CPU tensors. Device operations will explicitly move tensors as needed.",
+            RuntimeWarning
+        )
+    except Exception as e:
+        warnings.warn(
+            f"Unexpected error setting default device: {e}\n"
+            f"Falling back to CPU default tensors.",
+            RuntimeWarning
+        )
 
 
 def move_to_device(tensor, device):
@@ -184,6 +225,115 @@ def safe_to_device(tensor, device, operation_name="operation"):
             RuntimeWarning
         )
         return tensor.to('cpu')
+
+
+def estimate_volume_memory(volume_size, dtype_bytes=4, safety_factor=4):
+    """
+    Estimate GPU memory required for volume processing.
+
+    Args:
+        volume_size (int): Size of cubic volume (e.g., 256 for 256³)
+        dtype_bytes (int): Bytes per element (4 for float32, 8 for complex64)
+        safety_factor (int): Multiplier for intermediate tensors (default 4)
+
+    Returns:
+        int: Estimated memory in bytes
+    """
+    # Base volume size
+    base_memory = volume_size ** 3 * dtype_bytes
+
+    # Account for FFT intermediate buffers, gradients, etc.
+    estimated_total = base_memory * safety_factor
+
+    return estimated_total
+
+
+def check_available_memory(device):
+    """
+    Check available memory on the device.
+
+    Args:
+        device (torch.device): Device to check
+
+    Returns:
+        tuple: (available_bytes, total_bytes) or (None, None) if unavailable
+    """
+    try:
+        if device.type == 'cuda':
+            props = torch.cuda.get_device_properties(0)
+            total = props.total_memory
+            allocated = torch.cuda.memory_allocated(0)
+            reserved = torch.cuda.memory_reserved(0)
+            available = total - max(allocated, reserved)
+            return available, total
+
+        elif device.type == 'mps':
+            # MPS uses unified memory - check system memory
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                return mem.available, mem.total
+            except ImportError:
+                warnings.warn(
+                    "psutil not installed - cannot check memory. "
+                    "Install with: pip install psutil",
+                    RuntimeWarning
+                )
+                return None, None
+
+        else:  # CPU
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                return mem.available, mem.total
+            except ImportError:
+                return None, None
+
+    except Exception as e:
+        warnings.warn(f"Failed to check memory: {e}", RuntimeWarning)
+        return None, None
+
+
+def check_volume_fits_memory(volume_size, device, verbose=True):
+    """
+    Check if a volume of given size will fit in device memory.
+
+    Args:
+        volume_size (int): Size of cubic volume
+        device (torch.device): Target device
+        verbose (bool): Print warnings
+
+    Returns:
+        bool: True if volume should fit, False if it likely won't
+    """
+    required = estimate_volume_memory(volume_size)
+    available, total = check_available_memory(device)
+
+    if available is None:
+        # Can't check - assume it fits
+        if verbose:
+            print(f"INFO: Unable to verify memory for {volume_size}³ volume")
+        return True
+
+    fits = available > required
+
+    if verbose:
+        required_mb = required / (1024 ** 2)
+        available_mb = available / (1024 ** 2)
+        total_mb = total / (1024 ** 2)
+
+        if fits:
+            print(f"INFO: Volume {volume_size}³ requires ~{required_mb:.0f}MB, "
+                  f"{available_mb:.0f}MB available ({total_mb:.0f}MB total)")
+        else:
+            print(f"WARNING: Volume {volume_size}³ requires ~{required_mb:.0f}MB, "
+                  f"but only {available_mb:.0f}MB available ({total_mb:.0f}MB total)")
+            print(f"         Consider:")
+            print(f"         - Reducing volume size via downsampling")
+            print(f"         - Cropping to remove empty regions")
+            print(f"         - Using CPU mode (slower but more memory)")
+
+    return fits
 
 
 def test_device_performance(device, test_size=256):

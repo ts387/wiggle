@@ -42,6 +42,12 @@ Wiggle is a software package that integrates within [UCSF ChimeraX](https://www.
 
 **Note**: Previous versions required CuPy for GPU acceleration. As of version 0.2.2+, wiggle uses PyTorch for all GPU operations, enabling cross-platform GPU support including Apple Silicon Macs.
 
+## Security Notice
+
+⚠️ **Pickle File Security**: Wiggle loads model weights and configuration from Python pickle files (`.pkl`). **Only load pickle files from trusted sources** (e.g., your own cryoDRGN/cryoSPARC analyses or published datasets from reputable sources). Pickle files can execute arbitrary code during loading, so **never load pickle files from unknown or untrusted sources**.
+
+For sharing data with collaborators, prefer using Wiggle's `.npz` format which is safer than raw pickle files.
+
 ## Installation - developmental version
 This is an experimental and developmental version, currently in testing. In the future, Wiggle will be available via the UCSF ChimeraX toolshed. For now, to use Wiggle you must install it manually (see below).
 
@@ -117,9 +123,151 @@ When you launch Wiggle, it will automatically detect and report the available GP
 ### Volume rendering is slow for large boxes (cryoDRGN or cryoSPARC).
 Before rendering many volumes, start in the interactive mode and tune the cropping and downsampling options. Rendering whole volumes at the original sampling size is usually not necessary and can be cumbersomely slow. To improve speeds try the following:
 
-In cryoDRGN mode, try down sampling to 128 pixels and then find an appropriate cropping to remove unneccessary empty voxel. 
+In cryoDRGN mode, try down sampling to 128 pixels and then find an appropriate cropping to remove unneccessary empty voxel.
 
-Likewise, in cryoSPARC mode, first crop the volume to remove empty solvent voxels and then downsample by a factor of ~2. 
+Likewise, in cryoSPARC mode, first crop the volume to remove empty solvent voxels and then downsample by a factor of ~2.
+
+---
+
+## Troubleshooting
+
+### GPU/MPS Issues
+
+#### MPS operations falling back to CPU
+If you see warnings about MPS operations not being supported:
+
+1. **Check PyTorch version:**
+   ```bash
+   python -c "import torch; print(torch.__version__)"
+   ```
+
+2. **Upgrade if version < 2.0:**
+   ```bash
+   pip install --upgrade torch
+   ```
+
+3. **Verify MPS availability:**
+   ```bash
+   python -c "import torch; print(torch.backends.mps.is_available())"
+   ```
+
+4. **If MPS is unavailable on M-series Mac:**
+   - Ensure you're running on Apple Silicon (not Intel Mac)
+   - Check macOS version (requires macOS 12.3+)
+   - Reinstall PyTorch: `pip uninstall torch && pip install torch`
+
+#### Force CPU mode
+To force CPU mode instead of GPU (useful for debugging):
+
+```bash
+export PYTORCH_ENABLE_MPS_FALLBACK=1  # For MPS
+export CUDA_VISIBLE_DEVICES=""        # For CUDA
+```
+
+Then launch ChimeraX as normal.
+
+### Memory Issues
+
+#### Out of Memory (OOM) errors
+If you encounter "out of memory" errors:
+
+1. **Check available memory** - Wiggle will warn you if a volume is too large
+2. **Reduce volume size:**
+   - Use downsampling: Set downsample to 128 or smaller
+   - Enable cropping to remove empty regions
+   - Start with smaller test volumes
+
+3. **M-series Mac specific:**
+   - Base models (8GB unified memory) are limited to ~200³ voxel volumes
+   - Pro/Max/Ultra models (16GB+) can handle larger volumes
+   - Close other memory-intensive applications
+
+4. **Fallback to CPU:**
+   - CPU mode uses system RAM instead of GPU memory
+   - Slower but can handle larger volumes
+
+#### Memory warnings are incorrect
+If you see memory warnings but know you have enough memory:
+- Install `psutil` for accurate memory detection:
+  ```bash
+  /path/to/ChimeraX/bin/python3.9 -m pip install psutil
+  ```
+
+### Installation Issues
+
+#### PyTorch installation fails
+If PyTorch fails to install:
+
+1. **ChimeraX Python path issues:**
+   Try the alternative installation method:
+   ```bash
+   /path/to/ChimeraX/bin/ChimeraX -m pip install torch
+   ```
+
+2. **Check Python version:**
+   ChimeraX uses Python 3.9. Verify:
+   ```bash
+   /path/to/ChimeraX/bin/python3.9 --version
+   ```
+
+3. **Clear pip cache:**
+   ```bash
+   /path/to/ChimeraX/bin/python3.9 -m pip cache purge
+   /path/to/ChimeraX/bin/python3.9 -m pip install torch --no-cache-dir
+   ```
+
+#### Bundle installation fails
+If `devel install` fails:
+
+1. **Try cleaning first:**
+   ```bash
+   devel clean ~/path/to/wiggle
+   devel build ~/path/to/wiggle
+   devel install ~/path/to/wiggle
+   ```
+
+2. **Check ChimeraX version:**
+   Wiggle requires ChimeraX ≥ 1.3
+
+3. **Permissions issues:**
+   Ensure you have write permissions to the wiggle directory
+
+### Runtime Errors
+
+#### "No module named 'Qt'"
+This means ChimeraX's Qt bindings aren't found. Usually indicates:
+- Wiggle not properly installed in ChimeraX
+- Running outside ChimeraX environment
+
+**Solution:** Always run through ChimeraX, not standalone Python
+
+#### Pickle loading errors
+If you get errors loading `.pkl` files:
+- Ensure files are from compatible cryoDRGN/cryoSPARC versions
+- **Security:** Only load pickle files from trusted sources
+- Try regenerating the wiggle `.npz` file from original data
+
+#### Volume rendering produces black/empty volumes
+Check:
+1. Latent space coordinates are in valid range
+2. Model weights loaded correctly
+3. Input data normalization is correct
+4. Try different z-values to verify model is working
+
+### Getting Help
+
+If you encounter issues not covered here:
+
+1. **Check existing issues:** https://github.com/charbj/wiggle/issues
+2. **Create new issue** with:
+   - Operating system and version
+   - ChimeraX version
+   - PyTorch version (`python -c "import torch; print(torch.__version__)"`)
+   - GPU type (NVIDIA model, M1/M2/M3, or CPU)
+   - Full error message
+   - Steps to reproduce
+
+---
 
 ## Screen captures and GUI example
 ### Night and day mode examples of the Wiggle UI

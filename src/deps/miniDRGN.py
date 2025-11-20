@@ -453,9 +453,14 @@ class FTPositionalDecoder(nn.Module):
 
         vol_f = np.zeros((D, D, D), dtype=np.float32)
         assert not self.training
+
+        # Pre-allocate offset tensor for memory efficiency (reused in loop)
+        offset = torch.zeros(3, device=device)
+
         # evaluate the volume by zslice to avoid memory overflows
         for i, dz in enumerate(np.linspace(-extent, extent, D, endpoint=True, dtype=np.float32)):
-            x = coords + torch.tensor([0, 0, dz], device=device)
+            offset[2] = dz
+            x = coords + offset
             keep = x.pow(2).sum(dim=1) <= extent ** 2
             x = x[keep]
             if zval is not None:
