@@ -48,7 +48,7 @@ def get_available_device(verbose=True, force_redetect=False):
         device_type = 'cuda'
         try:
             device_name = torch.cuda.get_device_name(0)
-        except:
+        except (RuntimeError, AssertionError):
             device_name = "NVIDIA GPU"
 
         if verbose:
@@ -66,7 +66,7 @@ def get_available_device(verbose=True, force_redetect=False):
         torch_version = torch.__version__.split('+')[0]
         try:
             major, minor = map(int, torch_version.split('.')[:2])
-        except:
+        except (ValueError, IndexError):
             major, minor = 1, 0
 
         # Try to detect M-series chip
@@ -75,7 +75,7 @@ def get_available_device(verbose=True, force_redetect=False):
             import subprocess
             if platform.system() == 'Darwin':  # macOS
                 result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
-                                      capture_output=True, text=True)
+                                      capture_output=True, text=True, timeout=5)
                 cpu_brand = result.stdout.strip()
                 if 'Apple' in cpu_brand:
                     device_name = cpu_brand
@@ -83,22 +83,25 @@ def get_available_device(verbose=True, force_redetect=False):
                     device_name = "Apple Metal GPU"
             else:
                 device_name = "Apple Metal GPU"
-        except:
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, FileNotFoundError):
             device_name = "Apple Metal GPU"
 
-        if verbose:
-            print(f"GPU acceleration: Metal (MPS) detected ({device_name})")
-
-            # Warn about PyTorch version compatibility
-            if major < 2:
-                print(f"WARNING: PyTorch {torch_version} detected. For best MPS compatibility, upgrade to PyTorch 2.0+")
-                print("         Some operations may fall back to CPU")
-            elif major == 1 and minor < 12:
+        # Check for PyTorch version compatibility (must check before verbose output)
+        # Check the more specific case first (too old for MPS)
+        if major == 1 and minor < 12:
+            if verbose:
                 print(f"WARNING: PyTorch {torch_version} too old for MPS support (requires 1.12+)")
                 print("         Falling back to CPU")
-                device = torch.device('cpu')
-                device_type = 'cpu'
-                device_name = "CPU"
+            device = torch.device('cpu')
+            device_type = 'cpu'
+            device_name = "CPU"
+        else:
+            if verbose:
+                print(f"GPU acceleration: Metal (MPS) detected ({device_name})")
+                # Warn about PyTorch version compatibility
+                if major < 2:
+                    print(f"WARNING: PyTorch {torch_version} detected. For best MPS compatibility, upgrade to PyTorch 2.0+")
+                    print("         Some operations may fall back to CPU")
 
         _CACHED_DEVICE = (device, device_type, device_name)
         return _CACHED_DEVICE
@@ -127,29 +130,39 @@ def set_default_device(device):
         device (torch.device): The device to set as default
     """
     try:
-        if device.type == 'cuda':
-            torch.set_default_tensor_type(torch.cuda.FloatTensor)
-        elif device.type == 'mps':
-            # MPS doesn't support set_default_tensor_type, so we use set_default_device instead
-            # This requires PyTorch 2.0+
+        # Prefer the modern set_default_device API (PyTorch 2.0+) for all device types
+        if hasattr(torch, 'set_default_device'):
             try:
                 torch.set_default_device(device)
-            except AttributeError:
-                # Fallback for older PyTorch versions
-                warnings.warn(
-                    "PyTorch version doesn't support set_default_device for MPS. "
-                    "Tensors will need to be manually moved to MPS device. "
-                    "Consider upgrading to PyTorch 2.0+",
-                    RuntimeWarning
-                )
-            except Exception as e:
-                warnings.warn(
-                    f"Failed to set MPS as default device: {e}. "
-                    "Tensors will be created on CPU and moved to MPS as needed.",
-                    RuntimeWarning
-                )
+                return
+            except RuntimeError as e:
+                # Some devices may not be fully supported, fall through to legacy API
+                if device.type not in ('cuda', 'cpu'):
+                    warnings.warn(
+                        f"Failed to set {device.type} as default device: {e}. "
+                        "Tensors will be created on CPU and moved as needed.",
+                        RuntimeWarning
+                    )
+                    return
+
+        # Legacy fallback for older PyTorch versions or if set_default_device fails
+        if device.type == 'cuda':
+            # Use deprecated API only for older PyTorch versions
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=DeprecationWarning)
+                torch.set_default_tensor_type(torch.cuda.FloatTensor)
+        elif device.type == 'mps':
+            # MPS doesn't support set_default_tensor_type
+            warnings.warn(
+                "PyTorch version doesn't support set_default_device for MPS. "
+                "Tensors will need to be manually moved to MPS device. "
+                "Consider upgrading to PyTorch 2.0+",
+                RuntimeWarning
+            )
         else:
-            torch.set_default_tensor_type(torch.FloatTensor)
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=DeprecationWarning)
+                torch.set_default_tensor_type(torch.FloatTensor)
 
     except RuntimeError as e:
         # CUDA initialization can fail for various reasons
@@ -364,7 +377,7 @@ def test_device_performance(device, test_size=256):
         # MPS synchronization if available
         try:
             torch.mps.synchronize()
-        except:
+        except (AttributeError, RuntimeError):
             pass
 
     start = time.time()
@@ -376,7 +389,7 @@ def test_device_performance(device, test_size=256):
     elif device.type == 'mps':
         try:
             torch.mps.synchronize()
-        except:
+        except (AttributeError, RuntimeError):
             pass
 
     elapsed = time.time() - start

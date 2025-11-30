@@ -147,6 +147,8 @@ class FFT(QtCore.QObject):
         self.filter_resolution = filter_resolution
         # Use provided device or default to CPU
         self.device = device if device is not None else torch.device('cpu')
+        # Cache for numpy mask (used in CPU fallback)
+        self._mask_numpy_cache = None
 
     def filter(self):
         if self.filter_resolution > 1:
@@ -204,8 +206,8 @@ class FFT(QtCore.QObject):
                     f"For better performance, upgrade to PyTorch 2.0+",
                     RuntimeWarning
                 )
-                # Fall back to CPU-based NumPy implementation
-                return self.fourier_filter(map, mask.cpu().numpy())
+                # Fall back to CPU-based NumPy implementation with cached mask
+                return self.fourier_filter(map, self._get_mask_numpy(mask))
             else:
                 # For other devices, re-raise the exception
                 raise
@@ -217,7 +219,16 @@ class FFT(QtCore.QObject):
                 f"Falling back to CPU implementation.",
                 RuntimeWarning
             )
-            return self.fourier_filter(map, mask.cpu().numpy() if torch.is_tensor(mask) else mask)
+            return self.fourier_filter(map, self._get_mask_numpy(mask))
+
+    def _get_mask_numpy(self, mask):
+        """Get numpy version of mask, using cache if available."""
+        if self._mask_numpy_cache is None:
+            if torch.is_tensor(mask):
+                self._mask_numpy_cache = mask.cpu().numpy()
+            else:
+                self._mask_numpy_cache = mask
+        return self._mask_numpy_cache
 
     # def generate_sphere(self, volumeSize, radius):
     #     x_ = np.linspace(0, volumeSize, volumeSize)
